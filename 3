@@ -1,0 +1,1606 @@
+ def _open_programs_management(self):
+        """فتح نافذة إدارة البرامج والدورات بتصميم محسن"""
+
+        # إنشاء جداول البرامج في قاعدة البيانات إن لم تكن موجودة
+        self._create_programs_tables()
+
+        # إنشاء النافذة
+        programs_window = tk.Toplevel(self)
+        programs_window.title("إدارة البرامج والدورات")
+        programs_window.state('zoomed')
+        programs_window.configure(bg=self.COLORS["background"])
+        programs_window.transient(self)
+        programs_window.grab_set()
+
+        # متغيرات لتخزين البيانات
+        programs_data = {}  # لتخزين البرامج المنشأة
+        selected_courses_for_program = []  # لتخزين الدورات المحددة للبرنامج
+        all_courses_data = {}  # لتخزين بيانات جميع الدورات
+
+        # ================== الشريط العلوي بتصميم أنيق ==================
+        header = tk.Frame(programs_window, bg="#2c3e50", height=120)
+        header.pack(fill=tk.X)
+        header.pack_propagate(False)
+
+        header_content = tk.Frame(header, bg="#2c3e50")
+        header_content.pack(expand=True, fill=tk.BOTH)
+
+        tk.Label(
+            header_content,
+            text="نظام إدارة البرامج التدريبية",
+            font=("Tajawal", 32, "bold"),
+            bg="#2c3e50",
+            fg="white"
+        ).pack(pady=(25, 5))
+
+        tk.Label(
+            header_content,
+            text="قم بتجميع الدورات في برامج تدريبية موحدة",
+            font=("Tajawal", 16),
+            bg="#2c3e50",
+            fg="#ecf0f1"
+        ).pack()
+
+        # إطار الأزرار في الشريط العلوي
+        buttons_frame = tk.Frame(header, bg="#2c3e50")
+        buttons_frame.place(relx=0.98, rely=0.5, anchor="e")
+
+        # زر التصدير إلى Excel
+        def export_programs():
+            """تصدير البرامج إلى Excel مع تفاصيل محسنة"""
+            cursor = self.db_conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM programs")
+            count = cursor.fetchone()[0]
+
+            if count == 0:
+                messagebox.showwarning("تنبيه", "لا توجد برامج للتصدير")
+                return
+
+            try:
+                import pandas as pd
+                from tkinter import filedialog
+                import datetime
+
+                file_path = filedialog.asksaveasfilename(
+                    defaultextension=".xlsx",
+                    filetypes=[("Excel files", "*.xlsx")],
+                    initialfile=f"البرامج_التدريبية_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                )
+
+                if not file_path:
+                    return
+
+                # جلب البرامج من قاعدة البيانات
+                cursor.execute("""
+                    SELECT p.id, p.program_name, p.program_description
+                    FROM programs p
+                    ORDER BY p.id DESC
+                """)
+                programs = cursor.fetchall()
+
+                with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
+                    # ================== الصفحة الأولى: ملخص البرامج بتفاصيل أكثر ==================
+                    summary_data = []
+                    for prog in programs:
+                        prog_id = prog[0]
+
+                        # حساب إحصائيات مفصلة للبرنامج
+                        cursor.execute("""
+                            SELECT 
+                                COUNT(DISTINCT pc.course_id) as courses_count,
+                                COUNT(DISTINCT part.id) as total_participants,
+                                SUM(CASE WHEN part.participant_status IN ('مجتاز', 'باشر') THEN 1 ELSE 0 END) as passed_count,
+                                SUM(CASE WHEN part.participant_status = 'إلغاء دورة' THEN 1 ELSE 0 END) as cancelled_count,
+                                SUM(CASE WHEN part.participant_status = 'لم يباشر' THEN 1 ELSE 0 END) as not_started_count,
+                                SUM(CASE WHEN part.participant_status NOT IN ('مجتاز', 'باشر', 'إلغاء دورة', 'لم يباشر') 
+                                    AND part.participant_status IS NOT NULL THEN 1 ELSE 0 END) as other_status_count
+                            FROM program_courses pc
+                            LEFT JOIN courses c ON pc.course_id = c.id
+                            LEFT JOIN participants part ON c.id = part.course_id
+                            WHERE pc.program_id = ?
+                        """, (prog_id,))
+
+                        stats = cursor.fetchone()
+
+                        # حساب نسبة النجاح
+                        total_participants = stats[1] if stats[1] else 0
+                        passed_count = stats[2] if stats[2] else 0
+                        success_rate = (passed_count / total_participants * 100) if total_participants > 0 else 0
+
+                        summary_data.append({
+                            'اسم البرنامج': prog[1],
+                            'الوصف': prog[2] if prog[2] else '',
+                            'عدد الدورات': stats[0] if stats[0] else 0,
+                            'إجمالي المشاركين': total_participants,
+                            'عدد المجتازين': passed_count,
+                            'إلغاء دورة': stats[3] if stats[3] else 0,
+                            'لم يباشر': stats[4] if stats[4] else 0,
+                            'حالات أخرى': stats[5] if stats[5] else 0,
+                            'نسبة النجاح %': f"{success_rate:.1f}"
+                        })
+
+                    summary_df = pd.DataFrame(summary_data)
+                    summary_df.to_excel(writer, sheet_name='ملخص البرامج', index=False)
+
+                    # ================== الصفحة الثانية: تفاصيل الدورات (أرقام فقط) ==================
+                    details_data = []
+                    for prog in programs:
+                        prog_id = prog[0]
+                        prog_name = prog[1]
+
+                        # جلب تفاصيل الدورات مع تواريخ البداية والنهاية
+                        cursor.execute("""
+                            SELECT 
+                                c.course_code, 
+                                c.course_name, 
+                                c.course_category,
+                                DATE(c.start_date) as start_date,
+                                DATE(c.end_date) as end_date,
+                                COUNT(DISTINCT p.id) as total_participants,
+                                SUM(CASE WHEN p.participant_status IN ('مجتاز', 'باشر') THEN 1 ELSE 0 END) as passed,
+                                SUM(CASE WHEN p.participant_status = 'إلغاء دورة' THEN 1 ELSE 0 END) as cancelled,
+                                SUM(CASE WHEN p.participant_status = 'لم يباشر' THEN 1 ELSE 0 END) as not_started
+                            FROM program_courses pc
+                            JOIN courses c ON pc.course_id = c.id
+                            LEFT JOIN participants p ON c.id = p.course_id
+                            WHERE pc.program_id = ?
+                            GROUP BY c.id
+                            ORDER BY c.start_date
+                        """, (prog_id,))
+
+                        courses = cursor.fetchall()
+                        for course in courses:
+                            details_data.append({
+                                'اسم البرنامج': prog_name,
+                                'رقم الدورة': course[0],
+                                'اسم الدورة': course[1],
+                                'فئة الدورة': course[2] if course[2] else '',
+                                'تاريخ البداية': course[3] if course[3] else '',
+                                'تاريخ النهاية': course[4] if course[4] else '',
+                                'عدد المشاركين': course[5] if course[5] else 0,
+                                'المجتازين': course[6] if course[6] else 0,
+                                'إلغاء دورة': course[7] if course[7] else 0,
+                                'لم يباشر': course[8] if course[8] else 0
+                            })
+
+                    if details_data:
+                        details_df = pd.DataFrame(details_data)
+                        details_df.to_excel(writer, sheet_name='تفاصيل الدورات', index=False)
+
+                    # ================== الصفحة الثالثة: إحصائيات البرامج ==================
+                    stats_data = []
+                    for prog in programs:
+                        prog_id = prog[0]
+                        prog_name = prog[1]
+
+                        # إحصائيات مفصلة لكل برنامج
+                        cursor.execute("""
+                            SELECT 
+                                MIN(DATE(c.start_date)) as earliest_start,
+                                MAX(DATE(c.end_date)) as latest_end,
+                                COUNT(DISTINCT c.course_category) as category_count,
+                                COUNT(DISTINCT p.department) as department_count,
+                                AVG(CASE WHEN p.participant_status IN ('مجتاز', 'باشر') THEN 100.0 ELSE 0 END) as avg_success_rate
+                            FROM program_courses pc
+                            JOIN courses c ON pc.course_id = c.id
+                            LEFT JOIN participants p ON c.id = p.course_id
+                            WHERE pc.program_id = ?
+                        """, (prog_id,))
+
+                        prog_stats = cursor.fetchone()
+
+                        # حساب المدة الإجمالية للبرنامج
+                        if prog_stats[0] and prog_stats[1]:
+                            try:
+                                start_date = datetime.datetime.strptime(prog_stats[0], '%Y-%m-%d')
+                                end_date = datetime.datetime.strptime(prog_stats[1], '%Y-%m-%d')
+                                duration_days = (end_date - start_date).days
+                            except:
+                                duration_days = 0
+                        else:
+                            duration_days = 0
+
+                        stats_data.append({
+                            'اسم البرنامج': prog_name,
+                            'أول دورة (البداية)': prog_stats[0] if prog_stats[0] else '',
+                            'آخر دورة (النهاية)': prog_stats[1] if prog_stats[1] else '',
+                            'المدة بالأيام': duration_days,
+                            'عدد الفئات': prog_stats[2] if prog_stats[2] else 0,
+                            'عدد الجهات المستفيدة': prog_stats[3] if prog_stats[3] else 0,
+                            'متوسط نسبة النجاح %': f"{prog_stats[4]:.1f}" if prog_stats[4] else "0.0"
+                        })
+
+                    if stats_data:
+                        stats_df = pd.DataFrame(stats_data)
+                        stats_df.to_excel(writer, sheet_name='إحصائيات البرامج', index=False)
+
+                    # ================== التنسيق الشامل لجميع الأوراق ==================
+                    workbook = writer.book
+
+                    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+                    from openpyxl.utils import get_column_letter
+
+                    for sheet_name in workbook.sheetnames:
+                        worksheet = workbook[sheet_name]
+
+                        # اتجاه من اليمين لليسار
+                        worksheet.sheet_view.rightToLeft = True
+
+                        # تنسيق الرأس
+                        header_font = Font(name='Tajawal', size=13, bold=True, color='FFFFFF')
+                        header_fill = PatternFill(start_color='2c3e50', end_color='2c3e50', fill_type='solid')
+                        header_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+
+                        # تنسيق البيانات
+                        data_font = Font(name='Tajawal', size=11)
+                        data_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+
+                        # حدود
+                        thin_border = Border(
+                            left=Side(style='thin'),
+                            right=Side(style='thin'),
+                            top=Side(style='thin'),
+                            bottom=Side(style='thin')
+                        )
+
+                        # تطبيق التنسيق على جميع الخلايا
+                        for row in worksheet.iter_rows():
+                            for cell in row:
+                                cell.border = thin_border
+
+                                if cell.row == 1:  # الصف الأول (الرأس)
+                                    cell.font = header_font
+                                    cell.fill = header_fill
+                                    cell.alignment = header_alignment
+                                    worksheet.row_dimensions[1].height = 35
+                                else:  # باقي الصفوف
+                                    cell.font = data_font
+                                    cell.alignment = data_alignment
+
+                                    # تلوين الصفوف بالتناوب
+                                    if cell.row % 2 == 0:
+                                        cell.fill = PatternFill(start_color='F5F5F5', end_color='F5F5F5',
+                                                                fill_type='solid')
+                                    else:
+                                        cell.fill = PatternFill(start_color='FFFFFF', end_color='FFFFFF',
+                                                                fill_type='solid')
+
+                        # ضبط عرض الأعمدة تلقائياً مع توسيط
+                        for column in worksheet.columns:
+                            max_length = 0
+                            column_letter = column[0].column_letter
+
+                            for cell in column:
+                                try:
+                                    if cell.value:
+                                        # حساب طول النص
+                                        cell_length = len(str(cell.value))
+                                        if cell_length > max_length:
+                                            max_length = cell_length
+                                except:
+                                    pass
+
+                            # ضبط عرض العمود
+                            adjusted_width = min(max(max_length + 5, 12), 50)
+                            worksheet.column_dimensions[column_letter].width = adjusted_width
+
+                        # تجميد الصف الأول
+                        worksheet.freeze_panes = 'A2'
+
+                        # إضافة تنسيقات خاصة حسب الورقة
+                        if sheet_name == 'ملخص البرامج':
+                            # تمييز الأعمدة المهمة
+                            for row in worksheet.iter_rows(min_row=2):
+                                # تلوين خلية نسبة النجاح حسب القيمة
+                                success_cell = row[8]  # عمود نسبة النجاح
+                                try:
+                                    value = float(str(success_cell.value).replace('%', ''))
+                                    if value >= 80:
+                                        success_cell.font = Font(name='Tajawal', size=11, bold=True, color='27ae60')
+                                    elif value >= 60:
+                                        success_cell.font = Font(name='Tajawal', size=11, bold=True, color='f39c12')
+                                    else:
+                                        success_cell.font = Font(name='Tajawal', size=11, bold=True, color='e74c3c')
+                                except:
+                                    pass
+
+                                # تمييز المجتازين باللون الأخضر
+                                passed_cell = row[4]  # عمود المجتازين
+                                if passed_cell.value and int(passed_cell.value) > 0:
+                                    passed_cell.font = Font(name='Tajawal', size=11, bold=True, color='27ae60')
+
+                                # تمييز إلغاء دورة باللون الأحمر
+                                cancelled_cell = row[5]  # عمود إلغاء دورة
+                                if cancelled_cell.value and int(cancelled_cell.value) > 0:
+                                    cancelled_cell.font = Font(name='Tajawal', size=11, bold=True, color='e74c3c')
+
+                        elif sheet_name == 'تفاصيل الدورات':
+                            # ضبط عرض أعمدة التواريخ
+                            worksheet.column_dimensions['E'].width = 15  # تاريخ البداية
+                            worksheet.column_dimensions['F'].width = 15  # تاريخ النهاية
+
+                        elif sheet_name == 'إحصائيات البرامج':
+                            # تنسيق خاص للتواريخ والمدة
+                            worksheet.column_dimensions['B'].width = 15  # أول دورة
+                            worksheet.column_dimensions['C'].width = 15  # آخر دورة
+                            worksheet.column_dimensions['D'].width = 12  # المدة بالأيام
+
+                # إضافة ملخص في نهاية الملف
+                messagebox.showinfo(
+                    "نجاح",
+                    f"تم تصدير البرامج بنجاح!\n\n"
+                    f"📊 عدد البرامج: {len(programs)}\n"
+                    f"📄 عدد الأوراق: {len(workbook.sheetnames)}\n"
+                    f"💾 الملف: {file_path}\n\n"
+                    f"التفاصيل المُصدَّرة:\n"
+                    f"✅ ملخص البرامج مع الإحصائيات\n"
+                    f"✅ تفاصيل الدورات (أرقام فقط)\n"
+                    f"✅ إحصائيات البرامج الزمنية"
+                )
+
+                # فتح الملف تلقائياً
+                import os
+                import platform
+                import subprocess
+
+                try:
+                    if platform.system() == 'Windows':
+                        os.startfile(file_path)
+                    elif platform.system() == 'Darwin':  # macOS
+                        subprocess.call(['open', file_path])
+                    else:  # Linux
+                        subprocess.call(['xdg-open', file_path])
+                except:
+                    pass
+
+            except ImportError:
+                messagebox.showerror("خطأ", "يجب تثبيت مكتبة pandas و openpyxl\npip install pandas openpyxl")
+            except Exception as e:
+                messagebox.showerror("خطأ", f"فشل في التصدير:\n{str(e)}")
+
+        export_btn = tk.Button(
+            buttons_frame,
+            text="📥 تصدير Excel",
+            font=("Tajawal", 12, "bold"),
+            bg="#3498db",
+            fg="white",
+            padx=20,
+            pady=10,
+            bd=0,
+            relief=tk.FLAT,
+            cursor="hand2",
+            command=export_programs
+        )
+        export_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        # زر الإغلاق الأنيق
+        close_btn = tk.Button(
+            buttons_frame,
+            text="✕ إغلاق",
+            font=("Tajawal", 12, "bold"),
+            bg="#e74c3c",
+            fg="white",
+            padx=20,
+            pady=10,
+            bd=0,
+            relief=tk.FLAT,
+            cursor="hand2",
+            command=programs_window.destroy
+        )
+        close_btn.pack(side=tk.LEFT)
+
+        # ================== المحتوى الرئيسي مع تصميم محسن ==================
+        main_container = tk.Frame(programs_window, bg=self.COLORS["background"])
+        main_container.pack(fill=tk.BOTH, expand=True, padx=30, pady=20)
+
+        # ================== الجزء الأيسر: قائمة الدورات ==================
+        left_container = tk.Frame(main_container, bg=self.COLORS["card"], relief=tk.RAISED, bd=1)
+        left_container.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 15))
+
+        # شريط عنوان القسم الأيسر
+        left_header = tk.Frame(left_container, bg="#34495e", height=60)
+        left_header.pack(fill=tk.X)
+        left_header.pack_propagate(False)
+
+        tk.Label(
+            left_header,
+            text="قائمة الدورات المتاحة",
+            font=("Tajawal", 18, "bold"),
+            bg="#34495e",
+            fg="white"
+        ).pack(expand=True)
+
+        # محتوى القسم الأيسر
+        left_content = tk.Frame(left_container, bg=self.COLORS["card"])
+        left_content.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        # إطار البحث المحسن
+        search_frame = tk.Frame(left_content, bg="#ecf0f1", relief=tk.GROOVE, bd=1)
+        search_frame.pack(fill=tk.X, pady=(0, 15))
+
+        search_inner = tk.Frame(search_frame, bg="#ecf0f1")
+        search_inner.pack(fill=tk.X, padx=15, pady=10)
+
+        tk.Label(
+            search_inner,
+            text="🔍 البحث:",
+            font=("Tajawal", 14, "bold"),
+            bg="#ecf0f1",
+            fg="#2c3e50"
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        search_entry = tk.Entry(
+            search_inner,
+            font=("Tajawal", 13),
+            width=35,
+            bd=2,
+            relief=tk.FLAT,
+            bg="white"
+        )
+        search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # عداد الدورات
+        courses_count_label = tk.Label(
+            left_content,
+            text="إجمالي الدورات: 0",
+            font=("Tajawal", 12, "bold"),
+            bg=self.COLORS["card"],
+            fg="#3498db"
+        )
+        courses_count_label.pack(anchor="w", pady=(0, 10))
+
+        # قائمة الدورات المبسطة
+        courses_listbox_frame = tk.Frame(left_content, bg=self.COLORS["card"])
+        courses_listbox_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Listbox مع شريط التمرير
+        courses_scrollbar = tk.Scrollbar(courses_listbox_frame)
+        courses_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        courses_listbox = tk.Listbox(
+            courses_listbox_frame,
+            font=("Tajawal", 13),
+            bg="white",
+            fg="#2c3e50",
+            selectmode=tk.MULTIPLE,
+            selectbackground="#3498db",
+            selectforeground="white",
+            yscrollcommand=courses_scrollbar.set,
+            height=20,
+            bd=1,
+            relief=tk.SOLID,
+            activestyle='none'
+        )
+        courses_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        courses_scrollbar.config(command=courses_listbox.yview)
+
+        # معلومات الدورات المحددة
+        selected_info_frame = tk.Frame(left_content, bg="#d5dbdb", relief=tk.GROOVE, bd=1)
+        selected_info_frame.pack(fill=tk.X, pady=(15, 0))
+
+        selected_info_label = tk.Label(
+            selected_info_frame,
+            text="📌 لم يتم تحديد أي دورة",
+            font=("Tajawal", 12),
+            bg="#d5dbdb",
+            fg="#2c3e50"
+        )
+        selected_info_label.pack(pady=10)
+
+        # مفتاح الألوان
+        legend_frame = tk.Frame(left_content, bg=self.COLORS["card"])
+        legend_frame.pack(fill=tk.X, pady=(10, 0))
+
+        tk.Label(
+            legend_frame,
+            text="مفتاح الألوان:",
+            font=("Tajawal", 11, "bold"),
+            bg=self.COLORS["card"],
+            fg="#2c3e50"
+        ).pack(side=tk.LEFT)
+
+        tk.Label(
+            legend_frame,
+            text="■",
+            font=("Tajawal", 14),
+            bg=self.COLORS["card"],
+            fg="white"
+        ).pack(side=tk.LEFT, padx=(10, 2))
+
+        tk.Label(
+            legend_frame,
+            text="متاح",
+            font=("Tajawal", 10),
+            bg=self.COLORS["card"],
+            fg="#2c3e50"
+        ).pack(side=tk.LEFT)
+
+        tk.Label(
+            legend_frame,
+            text="■",
+            font=("Tajawal", 14),
+            bg=self.COLORS["card"],
+            fg="#c62828"
+        ).pack(side=tk.LEFT, padx=(15, 2))
+
+        tk.Label(
+            legend_frame,
+            text="مستخدم في برنامج",
+            font=("Tajawal", 10),
+            bg=self.COLORS["card"],
+            fg="#2c3e50"
+        ).pack(side=tk.LEFT)
+
+        # ================== الجزء الأيمن: إدارة البرامج ==================
+        right_container = tk.Frame(main_container, bg=self.COLORS["card"], relief=tk.RAISED, bd=1)
+        right_container.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(15, 0))
+
+        # شريط عنوان القسم الأيمن
+        right_header = tk.Frame(right_container, bg="#27ae60", height=60)
+        right_header.pack(fill=tk.X)
+        right_header.pack_propagate(False)
+
+        tk.Label(
+            right_header,
+            text="البرامج التدريبية",
+            font=("Tajawal", 18, "bold"),
+            bg="#27ae60",
+            fg="white"
+        ).pack(expand=True)
+
+        # محتوى القسم الأيمن
+        right_content = tk.Frame(right_container, bg=self.COLORS["card"])
+        right_content.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        # ================== قسم إنشاء برنامج جديد ==================
+        create_section = tk.Frame(right_content, bg="#ecf0f1", relief=tk.GROOVE, bd=1)
+        create_section.pack(fill=tk.X, pady=(0, 20))
+
+        create_inner = tk.Frame(create_section, bg="#ecf0f1")
+        create_inner.pack(fill=tk.X, padx=20, pady=15)
+
+        tk.Label(
+            create_inner,
+            text="✨ إنشاء برنامج جديد",
+            font=("Tajawal", 16, "bold"),
+            bg="#ecf0f1",
+            fg="#2c3e50"
+        ).pack(anchor="w", pady=(0, 15))
+
+        # حقل اسم البرنامج
+        name_frame = tk.Frame(create_inner, bg="#ecf0f1")
+        name_frame.pack(fill=tk.X, pady=(0, 10))
+
+        tk.Label(
+            name_frame,
+            text="اسم البرنامج:",
+            font=("Tajawal", 13),
+            bg="#ecf0f1",
+            fg="#2c3e50",
+            width=12,
+            anchor="e"
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        program_name_entry = tk.Entry(
+            name_frame,
+            font=("Tajawal", 13),
+            width=35,
+            bd=2,
+            relief=tk.FLAT,
+            bg="white"
+        )
+        program_name_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # حقل وصف البرنامج
+        desc_frame = tk.Frame(create_inner, bg="#ecf0f1")
+        desc_frame.pack(fill=tk.X, pady=(0, 15))
+
+        tk.Label(
+            desc_frame,
+            text="وصف البرنامج:",
+            font=("Tajawal", 13),
+            bg="#ecf0f1",
+            fg="#2c3e50",
+            width=12,
+            anchor="e"
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        program_desc_entry = tk.Entry(
+            desc_frame,
+            font=("Tajawal", 13),
+            width=35,
+            bd=2,
+            relief=tk.FLAT,
+            bg="white"
+        )
+        program_desc_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # معلومات الدورات المحددة للبرنامج
+        program_selected_label = tk.Label(
+            create_inner,
+            text="عدد الدورات المحددة: 0",
+            font=("Tajawal", 12),
+            bg="#ecf0f1",
+            fg="#7f8c8d"
+        )
+        program_selected_label.pack(anchor="w", pady=(0, 15))
+
+        # زر إنشاء البرنامج
+        create_btn_frame = tk.Frame(create_inner, bg="#ecf0f1")
+        create_btn_frame.pack()
+
+        create_btn = tk.Button(
+            create_btn_frame,
+            text="✅ إنشاء البرنامج",
+            font=("Tajawal", 14, "bold"),
+            bg="#27ae60",
+            fg="white",
+            padx=30,
+            pady=12,
+            bd=0,
+            relief=tk.FLAT,
+            cursor="hand2",
+            state=tk.DISABLED,
+            command=lambda: create_program()
+        )
+        create_btn.pack()
+
+        # ================== قائمة البرامج المنشأة ==================
+        programs_label = tk.Label(
+            right_content,
+            text="📦 البرامج المنشأة",
+            font=("Tajawal", 16, "bold"),
+            bg=self.COLORS["card"],
+            fg="#2c3e50"
+        )
+        programs_label.pack(anchor="w", pady=(0, 10))
+
+        # قائمة البرامج
+        programs_listbox_frame = tk.Frame(right_content, bg=self.COLORS["card"])
+        programs_listbox_frame.pack(fill=tk.BOTH, expand=True)
+
+        programs_scrollbar = tk.Scrollbar(programs_listbox_frame)
+        programs_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        programs_listbox = tk.Listbox(
+            programs_listbox_frame,
+            font=("Tajawal", 13),
+            bg="white",
+            fg="#2c3e50",
+            selectbackground="#27ae60",
+            selectforeground="white",
+            yscrollcommand=programs_scrollbar.set,
+            height=10,
+            bd=1,
+            relief=tk.SOLID,
+            activestyle='none'
+        )
+        programs_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        programs_scrollbar.config(command=programs_listbox.yview)
+
+        # ================== دالة الترتيب الأبجدي العربي ==================
+        def arabic_sort_key(text):
+            """مفتاح الترتيب للنصوص العربية"""
+            arabic_order = 'أابتثجحخدذرزسشصضطظعغفقكلمنهوي'
+            text = text.strip()
+            key = []
+            for char in text:
+                if char in arabic_order:
+                    key.append(arabic_order.index(char))
+                elif char == 'ة':
+                    key.append(arabic_order.index('ت'))
+                elif char == 'ى':
+                    key.append(arabic_order.index('ي'))
+                elif char == 'آ':
+                    key.append(arabic_order.index('ا'))
+                else:
+                    key.append(ord(char))
+            return key
+
+        # ================== دالة تحميل الدورات ==================
+        def load_courses():
+            """تحميل أسماء الدورات مع تمييز المستخدمة في البرامج"""
+            courses_listbox.delete(0, tk.END)
+            all_courses_data.clear()
+
+            cursor = self.db_conn.cursor()
+
+            # جلب الدورات المستخدمة في البرامج
+            cursor.execute("""
+                SELECT DISTINCT course_id, p.program_name 
+                FROM program_courses pc
+                JOIN programs p ON pc.program_id = p.id
+            """)
+            used_courses = {}
+            for course_id, program_name in cursor.fetchall():
+                if course_id not in used_courses:
+                    used_courses[course_id] = []
+                used_courses[course_id].append(program_name)
+
+            # جلب جميع الدورات
+            cursor.execute("""
+                SELECT c.id, c.course_code, c.course_name, c.course_category,
+                       COUNT(p.id) as participants_count
+                FROM courses c
+                LEFT JOIN participants p ON c.id = p.course_id
+                GROUP BY c.id
+                ORDER BY c.course_name
+            """)
+
+            courses = cursor.fetchall()
+
+            # تخزين البيانات وإعداد القائمة
+            courses_list = []
+            course_name_counter = {}
+
+            for course in courses:
+                course_id = course[0]
+                course_code = course[1]
+                course_name = course[2]
+                course_category = course[3] if course[3] else ""
+                participants = course[4] if course[4] else 0
+
+                # التعامل مع الأسماء المكررة
+                display_name = course_name
+                if course_name in course_name_counter:
+                    course_name_counter[course_name] += 1
+                    display_name = f"{course_name} ({course_code})"
+                else:
+                    course_name_counter[course_name] = 1
+                    temp_count = sum(1 for c in courses if c[2] == course_name)
+                    if temp_count > 1:
+                        display_name = f"{course_name} ({course_code})"
+
+                # تخزين البيانات الكاملة مع معلومات الاستخدام
+                all_courses_data[display_name] = {
+                    'id': course_id,
+                    'code': course_code,
+                    'name': course_name,
+                    'category': course_category,
+                    'participants': participants,
+                    'display_name': display_name,
+                    'used_in_programs': used_courses.get(course_id, [])
+                }
+
+                courses_list.append(display_name)
+
+            # ترتيب القائمة أبجدياً
+            try:
+                courses_list.sort(key=arabic_sort_key)
+            except:
+                courses_list.sort()
+
+            # إضافة الأسماء إلى القائمة مع التلوين
+            for idx, course_name in enumerate(courses_list):
+                courses_listbox.insert(tk.END, course_name)
+
+                # تلوين الدورات المستخدمة
+                if all_courses_data[course_name]['used_in_programs']:
+                    courses_listbox.itemconfig(idx, {'bg': '#ffebee', 'fg': '#c62828'})
+
+            # تحديث العداد
+            available_count = sum(1 for c in all_courses_data.values() if not c['used_in_programs'])
+            used_count = len(courses_list) - available_count
+            courses_count_label.config(
+                text=f"إجمالي: {len(courses_list)} | متاح: {available_count} | مستخدم: {used_count}"
+            )
+
+        # ================== دالة تحميل البرامج المحفوظة ==================
+        def load_programs():
+            """تحميل البرامج المحفوظة من قاعدة البيانات"""
+            programs_listbox.delete(0, tk.END)
+            programs_data.clear()
+
+            cursor = self.db_conn.cursor()
+            cursor.execute("""
+                SELECT p.id, p.program_name, p.program_description, 
+                       COUNT(DISTINCT pc.course_id) as courses_count,
+                       SUM(CASE WHEN part.id IS NOT NULL THEN 1 ELSE 0 END) as participants_count
+                FROM programs p
+                LEFT JOIN program_courses pc ON p.id = pc.program_id
+                LEFT JOIN courses c ON pc.course_id = c.id
+                LEFT JOIN participants part ON c.id = part.course_id
+                GROUP BY p.id
+                ORDER BY p.id DESC
+            """)
+
+            programs = cursor.fetchall()
+
+            for prog in programs:
+                prog_id = prog[0]
+                prog_name = prog[1]
+                prog_desc = prog[2]
+                courses_count = prog[3] if prog[3] else 0
+                participants_count = prog[4] if prog[4] else 0
+
+                # جلب الدورات المرتبطة بالبرنامج
+                cursor.execute("""
+                    SELECT c.id, c.course_code, c.course_name, c.course_category,
+                           COUNT(p.id) as participants_count
+                    FROM program_courses pc
+                    JOIN courses c ON pc.course_id = c.id
+                    LEFT JOIN participants p ON c.id = p.course_id
+                    WHERE pc.program_id = ?
+                    GROUP BY c.id
+                """, (prog_id,))
+
+                program_courses = []
+                for course in cursor.fetchall():
+                    program_courses.append({
+                        'id': course[0],
+                        'code': course[1],
+                        'name': course[2],
+                        'category': course[3] if course[3] else '',
+                        'participants': course[4] if course[4] else 0
+                    })
+
+                # تخزين البيانات في الذاكرة للوصول السريع
+                programs_data[prog_id] = {
+                    'name': prog_name,
+                    'description': prog_desc if prog_desc else '',
+                    'courses': program_courses,
+                    'total_courses': courses_count,
+                    'total_participants': participants_count
+                }
+
+                # إضافة البرنامج إلى القائمة
+                programs_listbox.insert(
+                    tk.END,
+                    f"{prog_name} ({courses_count} دورة - {participants_count} مشارك)"
+                )
+
+        # ================== دالة البحث ==================
+        def search_courses(event=None):
+            """البحث في أسماء الدورات"""
+            search_text = search_entry.get().strip().lower()
+
+            courses_listbox.delete(0, tk.END)
+
+            filtered_courses = []
+            for display_name, course_data in all_courses_data.items():
+                if not search_text or (
+                        search_text in course_data['name'].lower() or
+                        search_text in course_data['code'].lower() or
+                        search_text in display_name.lower()
+                ):
+                    filtered_courses.append(display_name)
+
+            try:
+                filtered_courses.sort(key=arabic_sort_key)
+            except:
+                filtered_courses.sort()
+
+            for course_name in filtered_courses:
+                courses_listbox.insert(tk.END, course_name)
+
+            if search_text:
+                courses_count_label.config(text=f"نتائج البحث: {len(filtered_courses)}")
+            else:
+                courses_count_label.config(text=f"إجمالي الدورات: {len(filtered_courses)}")
+
+        search_entry.bind('<KeyRelease>', search_courses)
+
+        # ================== دالة تحديد الدورات ==================
+        def on_courses_select(event=None):
+            """التعامل مع تحديد الدورات مع منع اختيار المستخدمة"""
+            selected_indices = list(courses_listbox.curselection())
+
+            selected_courses_for_program.clear()
+
+            # تصفية الدورات المحددة
+            valid_selections = []
+            for index in selected_indices:
+                course_name = courses_listbox.get(index)
+                if course_name in all_courses_data:
+                    course_data = all_courses_data[course_name]
+
+                    # التحقق من أن الدورة غير مستخدمة
+                    if course_data['used_in_programs']:
+                        # إلغاء تحديد الدورة المستخدمة
+                        courses_listbox.selection_clear(index)
+                        messagebox.showwarning(
+                            "تنبيه",
+                            f"الدورة '{course_data['name']}' مستخدمة في البرنامج:\n" +
+                            "\n".join(course_data['used_in_programs'])
+                        )
+                    else:
+                        selected_courses_for_program.append(course_data)
+                        valid_selections.append(index)
+
+            count = len(selected_courses_for_program)
+            if count > 0:
+                selected_info_label.config(
+                    text=f"📌 تم تحديد {count} دورة",
+                    fg="#27ae60"
+                )
+                program_selected_label.config(text=f"عدد الدورات المحددة: {count}")
+                create_btn.config(state=tk.NORMAL)
+            else:
+                selected_info_label.config(
+                    text="📌 لم يتم تحديد أي دورة",
+                    fg="#2c3e50"
+                )
+                program_selected_label.config(text="عدد الدورات المحددة: 0")
+                create_btn.config(state=tk.DISABLED)
+
+        courses_listbox.bind('<<ListboxSelect>>', on_courses_select)
+
+        # ================== دالة إنشاء البرنامج ==================
+        def create_program():
+            """إنشاء برنامج جديد وحفظه في قاعدة البيانات"""
+            program_name = program_name_entry.get().strip()
+            program_desc = program_desc_entry.get().strip()
+
+            if not program_name:
+                messagebox.showwarning("تنبيه", "يرجى إدخال اسم البرنامج")
+                return
+
+            if len(selected_courses_for_program) == 0:
+                messagebox.showwarning("تنبيه", "يرجى اختيار دورة واحدة على الأقل")
+                return
+
+            try:
+                import datetime
+
+                # إدراج البرنامج في قاعدة البيانات
+                cursor = self.db_conn.cursor()
+                cursor.execute("""
+                    INSERT INTO programs (program_name, program_description, created_date, created_by)
+                    VALUES (?, ?, ?, ?)
+                """, (
+                    program_name,
+                    program_desc,
+                    datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    self.current_user["full_name"] if self.current_user else "النظام"
+                ))
+
+                program_id = cursor.lastrowid
+
+                # ربط الدورات بالبرنامج
+                for course in selected_courses_for_program:
+                    cursor.execute("""
+                        INSERT INTO program_courses (program_id, course_id)
+                        VALUES (?, ?)
+                    """, (program_id, course['id']))
+
+                self.db_conn.commit()
+
+                # مسح الحقول
+                program_name_entry.delete(0, tk.END)
+                program_desc_entry.delete(0, tk.END)
+                selected_courses_for_program.clear()
+                program_selected_label.config(text="عدد الدورات المحددة: 0")
+                create_btn.config(state=tk.DISABLED)
+
+                # إلغاء التحديد في قائمة الدورات
+                courses_listbox.selection_clear(0, tk.END)
+                selected_info_label.config(text="📌 لم يتم تحديد أي دورة", fg="#2c3e50")
+
+                messagebox.showinfo("نجاح", f"تم إنشاء البرنامج '{program_name}' بنجاح")
+
+                # إعادة تحميل قائمة البرامج
+                load_programs()
+
+            except Exception as e:
+                messagebox.showerror("خطأ", f"فشل في حفظ البرنامج:\n{str(e)}")
+                self.db_conn.rollback()
+
+        # ================== دالة حذف البرنامج ==================
+        def delete_program():
+            """حذف البرنامج المحدد"""
+            selection = programs_listbox.curselection()
+            if not selection:
+                messagebox.showwarning("تنبيه", "يرجى اختيار برنامج للحذف")
+                return
+
+            program_text = programs_listbox.get(selection[0])
+            program_name = program_text.split(" (")[0]
+
+            if messagebox.askyesno("تأكيد الحذف", f"هل تريد حذف البرنامج '{program_name}'؟"):
+                try:
+                    # البحث عن معرف البرنامج
+                    cursor = self.db_conn.cursor()
+                    cursor.execute("SELECT id FROM programs WHERE program_name = ?", (program_name,))
+                    result = cursor.fetchone()
+
+                    if result:
+                        prog_id = result[0]
+
+                        # حذف الروابط أولاً
+                        cursor.execute("DELETE FROM program_courses WHERE program_id = ?", (prog_id,))
+
+                        # حذف البرنامج
+                        cursor.execute("DELETE FROM programs WHERE id = ?", (prog_id,))
+
+                        self.db_conn.commit()
+
+                        messagebox.showinfo("نجاح", "تم حذف البرنامج بنجاح")
+                        load_programs()
+
+                except Exception as e:
+                    messagebox.showerror("خطأ", f"فشل في حذف البرنامج:\n{str(e)}")
+                    self.db_conn.rollback()
+
+        # إضافة قائمة بزر الماوس الأيمن للبرامج
+        def on_program_right_click(event):
+            """قائمة السياق للبرامج"""
+            selection = programs_listbox.curselection()
+            if not selection:
+                return
+
+            context_menu = tk.Menu(programs_window, tearoff=0)
+            context_menu.add_command(label="📋 عرض التفاصيل", command=lambda: show_program_details())
+            context_menu.add_command(label="✏️ تعديل البرنامج", command=lambda: edit_program())
+            context_menu.add_separator()
+            context_menu.add_command(label="🗑️ حذف البرنامج", command=delete_program)
+
+            context_menu.post(event.x_root, event.y_root)
+
+        programs_listbox.bind('<Button-3>', on_program_right_click)
+
+        # ================== دالة تعديل البرنامج ==================
+        def edit_program():
+            """تعديل البرنامج المحدد"""
+            selection = programs_listbox.curselection()
+            if not selection:
+                messagebox.showwarning("تنبيه", "يرجى اختيار برنامج للتعديل")
+                return
+
+            program_text = programs_listbox.get(selection[0])
+            program_name = program_text.split(" (")[0]
+
+            # البحث عن البرنامج في قاعدة البيانات
+            cursor = self.db_conn.cursor()
+            cursor.execute("""
+                SELECT id, program_name, program_description 
+                FROM programs 
+                WHERE program_name = ?
+            """, (program_name,))
+
+            program_data = cursor.fetchone()
+            if not program_data:
+                messagebox.showerror("خطأ", "لم يتم العثور على البرنامج")
+                return
+
+            prog_id, prog_name, prog_desc = program_data
+
+            # جلب الدورات المرتبطة بالبرنامج
+            cursor.execute("""
+                SELECT c.id, c.course_code, c.course_name, c.course_category,
+                       COUNT(p.id) as participants_count
+                FROM program_courses pc
+                JOIN courses c ON pc.course_id = c.id
+                LEFT JOIN participants p ON c.id = p.course_id
+                WHERE pc.program_id = ?
+                GROUP BY c.id
+            """, (prog_id,))
+
+            program_courses = cursor.fetchall()
+
+            # نافذة التعديل
+            edit_window = tk.Toplevel(programs_window)
+            edit_window.title(f"تعديل البرنامج: {prog_name}")
+            edit_window.geometry("1000x700")
+            edit_window.configure(bg=self.COLORS["background"])
+            edit_window.transient(programs_window)
+            edit_window.grab_set()
+
+            # توسيط النافذة
+            edit_window.update_idletasks()
+            x = (edit_window.winfo_screenwidth() - 1000) // 2
+            y = (edit_window.winfo_screenheight() - 700) // 2
+            edit_window.geometry(f"1000x700+{x}+{y}")
+
+            # الشريط العلوي
+            header = tk.Frame(edit_window, bg="#e67e22", height=80)
+            header.pack(fill=tk.X)
+            header.pack_propagate(False)
+
+            tk.Label(
+                header,
+                text=f"تعديل البرنامج: {prog_name}",
+                font=("Tajawal", 24, "bold"),
+                bg="#e67e22",
+                fg="white"
+            ).pack(expand=True)
+
+            # زر الإغلاق
+            close_btn = tk.Button(
+                header,
+                text="✕ إغلاق",
+                font=("Tajawal", 11, "bold"),
+                bg="#c0392b",
+                fg="white",
+                padx=15,
+                pady=8,
+                bd=0,
+                relief=tk.FLAT,
+                cursor="hand2",
+                command=edit_window.destroy
+            )
+            close_btn.place(relx=0.98, rely=0.5, anchor="e")
+
+            # المحتوى
+            content = tk.Frame(edit_window, bg=self.COLORS["background"])
+            content.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+            # ================== قسم تعديل المعلومات الأساسية ==================
+            info_frame = tk.Frame(content, bg=self.COLORS["card"], relief=tk.RAISED, bd=1)
+            info_frame.pack(fill=tk.X, pady=(0, 15))
+
+            info_inner = tk.Frame(info_frame, bg=self.COLORS["card"], padx=20, pady=20)
+            info_inner.pack(fill=tk.BOTH)
+
+            # اسم البرنامج
+            name_frame = tk.Frame(info_inner, bg=self.COLORS["card"])
+            name_frame.pack(fill=tk.X, pady=(0, 15))
+
+            tk.Label(
+                name_frame,
+                text="اسم البرنامج:",
+                font=("Tajawal", 13, "bold"),
+                bg=self.COLORS["card"],
+                fg="#2c3e50",
+                width=12
+            ).pack(side=tk.LEFT)
+
+            name_entry = tk.Entry(
+                name_frame,
+                font=("Tajawal", 13),
+                width=40,
+                bd=2,
+                relief=tk.GROOVE
+            )
+            name_entry.pack(side=tk.LEFT, padx=10)
+            name_entry.insert(0, prog_name)
+
+            # وصف البرنامج
+            desc_frame = tk.Frame(info_inner, bg=self.COLORS["card"])
+            desc_frame.pack(fill=tk.X)
+
+            tk.Label(
+                desc_frame,
+                text="وصف البرنامج:",
+                font=("Tajawal", 13, "bold"),
+                bg=self.COLORS["card"],
+                fg="#2c3e50",
+                width=12
+            ).pack(side=tk.LEFT)
+
+            desc_entry = tk.Entry(
+                desc_frame,
+                font=("Tajawal", 13),
+                width=40,
+                bd=2,
+                relief=tk.GROOVE
+            )
+            desc_entry.pack(side=tk.LEFT, padx=10)
+            desc_entry.insert(0, prog_desc if prog_desc else "")
+
+            # زر حفظ التغييرات الأساسية
+            def save_basic_info():
+                new_name = name_entry.get().strip()
+                new_desc = desc_entry.get().strip()
+
+                if not new_name:
+                    messagebox.showwarning("تنبيه", "يجب إدخال اسم للبرنامج")
+                    return
+
+                try:
+                    cursor.execute("""
+                        UPDATE programs 
+                        SET program_name = ?, program_description = ?
+                        WHERE id = ?
+                    """, (new_name, new_desc, prog_id))
+
+                    self.db_conn.commit()
+                    messagebox.showinfo("نجاح", "تم تحديث معلومات البرنامج")
+                    load_programs()
+
+                except Exception as e:
+                    messagebox.showerror("خطأ", f"فشل في تحديث المعلومات:\n{str(e)}")
+
+            save_info_btn = tk.Button(
+                info_inner,
+                text="💾 حفظ المعلومات الأساسية",
+                font=("Tajawal", 12, "bold"),
+                bg="#27ae60",
+                fg="white",
+                padx=20,
+                pady=10,
+                bd=0,
+                relief=tk.FLAT,
+                cursor="hand2",
+                command=save_basic_info
+            )
+            save_info_btn.pack(pady=(15, 0))
+
+            # ================== قسم إدارة الدورات ==================
+            courses_frame = tk.Frame(content, bg=self.COLORS["card"], relief=tk.RAISED, bd=1)
+            courses_frame.pack(fill=tk.BOTH, expand=True)
+
+            # شريط العنوان
+            courses_header = tk.Frame(courses_frame, bg="#34495e", height=40)
+            courses_header.pack(fill=tk.X)
+            courses_header.pack_propagate(False)
+
+            tk.Label(
+                courses_header,
+                text="إدارة دورات البرنامج",
+                font=("Tajawal", 14, "bold"),
+                bg="#34495e",
+                fg="white"
+            ).pack(expand=True)
+
+            courses_content = tk.Frame(courses_frame, bg=self.COLORS["card"])
+            courses_content.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+            # إطار القوائم
+            lists_frame = tk.Frame(courses_content, bg=self.COLORS["card"])
+            lists_frame.pack(fill=tk.BOTH, expand=True)
+
+            # ================== القائمة اليسرى: الدورات الحالية ==================
+            current_frame = tk.Frame(lists_frame, bg=self.COLORS["card"])
+            current_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
+
+            tk.Label(
+                current_frame,
+                text="الدورات الحالية في البرنامج:",
+                font=("Tajawal", 13, "bold"),
+                bg=self.COLORS["card"],
+                fg="#2c3e50"
+            ).pack(anchor="w", pady=(0, 10))
+
+            # Listbox للدورات الحالية
+            current_listbox_frame = tk.Frame(current_frame, bg=self.COLORS["card"])
+            current_listbox_frame.pack(fill=tk.BOTH, expand=True)
+
+            current_scrollbar = tk.Scrollbar(current_listbox_frame)
+            current_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+            current_listbox = tk.Listbox(
+                current_listbox_frame,
+                font=("Tajawal", 12),
+                bg="white",
+                fg="#2c3e50",
+                selectmode=tk.MULTIPLE,
+                selectbackground="#e74c3c",
+                selectforeground="white",
+                yscrollcommand=current_scrollbar.set,
+                height=15
+            )
+            current_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            current_scrollbar.config(command=current_listbox.yview)
+
+            # ملء القائمة بالدورات الحالية
+            for course in program_courses:
+                current_listbox.insert(tk.END, f"{course[2]} ({course[1]})")
+
+            # ================== الأزرار الوسطية ==================
+            buttons_frame = tk.Frame(lists_frame, bg=self.COLORS["card"])
+            buttons_frame.pack(side=tk.LEFT, padx=20)
+
+            def remove_courses():
+                """إزالة الدورات المحددة من البرنامج"""
+                selected = current_listbox.curselection()
+                if not selected:
+                    messagebox.showwarning("تنبيه", "اختر دورة أو أكثر للإزالة")
+                    return
+
+                # جمع معرفات الدورات للحذف
+                courses_to_remove = []
+                for idx in selected:
+                    course_text = current_listbox.get(idx)
+                    course_code = course_text.split("(")[1].split(")")[0]
+
+                    # البحث عن معرف الدورة
+                    for course in program_courses:
+                        if course[1] == course_code:
+                            courses_to_remove.append(course[0])
+                            break
+
+                if messagebox.askyesno("تأكيد", f"هل تريد إزالة {len(courses_to_remove)} دورة من البرنامج؟"):
+                    try:
+                        for course_id in courses_to_remove:
+                            cursor.execute("""
+                                DELETE FROM program_courses 
+                                WHERE program_id = ? AND course_id = ?
+                            """, (prog_id, course_id))
+
+                        self.db_conn.commit()
+
+                        # تحديث القوائم
+                        for idx in reversed(selected):
+                            item = current_listbox.get(idx)
+                            current_listbox.delete(idx)
+                            available_listbox.insert(tk.END, item)
+
+                        messagebox.showinfo("نجاح", "تم إزالة الدورات من البرنامج")
+                        load_programs()
+                        load_courses()
+
+                    except Exception as e:
+                        messagebox.showerror("خطأ", f"فشل في إزالة الدورات:\n{str(e)}")
+
+            remove_btn = tk.Button(
+                buttons_frame,
+                text="◀ إزالة",
+                font=("Tajawal", 12, "bold"),
+                bg="#e74c3c",
+                fg="white",
+                padx=20,
+                pady=10,
+                bd=0,
+                relief=tk.FLAT,
+                cursor="hand2",
+                command=remove_courses
+            )
+            remove_btn.pack(pady=10)
+
+            def add_courses():
+                """إضافة دورات جديدة للبرنامج"""
+                selected = available_listbox.curselection()
+                if not selected:
+                    messagebox.showwarning("تنبيه", "اختر دورة أو أكثر للإضافة")
+                    return
+
+                # جمع معرفات الدورات للإضافة
+                courses_to_add = []
+                for idx in selected:
+                    course_text = available_listbox.get(idx)
+                    course_code = course_text.split("(")[1].split(")")[0]
+
+                    # البحث عن معرف الدورة
+                    cursor.execute("SELECT id FROM courses WHERE course_code = ?", (course_code,))
+                    result = cursor.fetchone()
+                    if result:
+                        courses_to_add.append(result[0])
+
+                if courses_to_add:
+                    try:
+                        for course_id in courses_to_add:
+                            cursor.execute("""
+                                INSERT INTO program_courses (program_id, course_id)
+                                VALUES (?, ?)
+                            """, (prog_id, course_id))
+
+                        self.db_conn.commit()
+
+                        # تحديث القوائم
+                        for idx in reversed(selected):
+                            item = available_listbox.get(idx)
+                            available_listbox.delete(idx)
+                            current_listbox.insert(tk.END, item)
+
+                        messagebox.showinfo("نجاح", "تم إضافة الدورات للبرنامج")
+                        load_programs()
+                        load_courses()
+
+                    except Exception as e:
+                        messagebox.showerror("خطأ", f"فشل في إضافة الدورات:\n{str(e)}")
+
+            add_btn = tk.Button(
+                buttons_frame,
+                text="إضافة ▶",
+                font=("Tajawal", 12, "bold"),
+                bg="#27ae60",
+                fg="white",
+                padx=20,
+                pady=10,
+                bd=0,
+                relief=tk.FLAT,
+                cursor="hand2",
+                command=add_courses
+            )
+            add_btn.pack(pady=10)
+
+            # ================== القائمة اليمنى: الدورات المتاحة ==================
+            available_frame = tk.Frame(lists_frame, bg=self.COLORS["card"])
+            available_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(10, 0))
+
+            tk.Label(
+                available_frame,
+                text="الدورات المتاحة للإضافة:",
+                font=("Tajawal", 13, "bold"),
+                bg=self.COLORS["card"],
+                fg="#2c3e50"
+            ).pack(anchor="w", pady=(0, 10))
+
+            # Listbox للدورات المتاحة
+            available_listbox_frame = tk.Frame(available_frame, bg=self.COLORS["card"])
+            available_listbox_frame.pack(fill=tk.BOTH, expand=True)
+
+            available_scrollbar = tk.Scrollbar(available_listbox_frame)
+            available_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+            available_listbox = tk.Listbox(
+                available_listbox_frame,
+                font=("Tajawal", 12),
+                bg="white",
+                fg="#2c3e50",
+                selectmode=tk.MULTIPLE,
+                selectbackground="#27ae60",
+                selectforeground="white",
+                yscrollcommand=available_scrollbar.set,
+                height=15
+            )
+            available_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            available_scrollbar.config(command=available_listbox.yview)
+
+            # جلب الدورات المتاحة (غير المستخدمة في أي برنامج)
+            cursor.execute("""
+                SELECT c.id, c.course_code, c.course_name
+                FROM courses c
+                WHERE c.id NOT IN (
+                    SELECT DISTINCT course_id FROM program_courses
+                )
+                ORDER BY c.course_name
+            """)
+
+            available_courses = cursor.fetchall()
+            for course in available_courses:
+                available_listbox.insert(tk.END, f"{course[2]} ({course[1]})")
+
+        # ================== دالة عرض تفاصيل البرنامج ==================
+        def show_program_details(event=None):
+            """عرض تفاصيل البرنامج عند النقر المزدوج"""
+            selection = programs_listbox.curselection()
+            if not selection:
+                return
+
+            program_text = programs_listbox.get(selection[0])
+            program_name = program_text.split(" (")[0]
+
+            # البحث عن البرنامج في القاموس
+            program_details = None
+            program_id = None
+            for prog_id, prog_data in programs_data.items():
+                if prog_data['name'] == program_name:
+                    program_details = prog_data
+                    program_id = prog_id
+                    break
+
+            if not program_details:
+                return
+
+            # نافذة التفاصيل
+            details_window = tk.Toplevel(programs_window)
+            details_window.title(f"تفاصيل البرنامج: {program_name}")
+            details_window.geometry("900x650")
+            details_window.configure(bg=self.COLORS["background"])
+            details_window.transient(programs_window)
+            details_window.grab_set()
+
+            # توسيط النافذة
+            details_window.update_idletasks()
+            x = (details_window.winfo_screenwidth() - 900) // 2
+            y = (details_window.winfo_screenheight() - 650) // 2
+            details_window.geometry(f"900x650+{x}+{y}")
+
+            # الشريط العلوي
+            header = tk.Frame(details_window, bg="#27ae60", height=100)
+            header.pack(fill=tk.X)
+            header.pack_propagate(False)
+
+            header_content = tk.Frame(header, bg="#27ae60")
+            header_content.pack(expand=True)
+
+            tk.Label(
+                header_content,
+                text=f"📦 {program_name}",
+                font=("Tajawal", 24, "bold"),
+                bg="#27ae60",
+                fg="white"
+            ).pack(pady=(20, 5))
+
+            tk.Label(
+                header_content,
+                text=f"{program_details['description']}",
+                font=("Tajawal", 14),
+                bg="#27ae60",
+                fg="#e8f8f5"
+            ).pack()
+
+            # المحتوى
+            content_frame = tk.Frame(details_window, bg=self.COLORS["card"])
+            content_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+            # الإحصائيات
+            stats_frame = tk.Frame(content_frame, bg="#ecf0f1", relief=tk.GROOVE, bd=1)
+            stats_frame.pack(fill=tk.X, pady=(0, 20))
+
+            stats_inner = tk.Frame(stats_frame, bg="#ecf0f1")
+            stats_inner.pack(pady=15)
+
+            tk.Label(
+                stats_inner,
+                text=f"📊 عدد الدورات: {program_details['total_courses']}",
+                font=("Tajawal", 14, "bold"),
+                bg="#ecf0f1",
+                fg="#2980b9"
+            ).pack(side=tk.LEFT, padx=30)
+
+            tk.Label(
+                stats_inner,
+                text=f"👥 إجمالي المشاركين: {program_details['total_participants']}",
+                font=("Tajawal", 14, "bold"),
+                bg="#ecf0f1",
+                fg="#e74c3c"
+            ).pack(side=tk.LEFT, padx=30)
+
+            # قائمة الدورات
+            tk.Label(
+                content_frame,
+                text="الدورات المتضمنة في البرنامج:",
+                font=("Tajawal", 16, "bold"),
+                bg=self.COLORS["card"],
+                fg="#2c3e50"
+            ).pack(anchor="w", pady=(0, 10))
+
+            # جدول الدورات
+            from tkinter import ttk
+
+            courses_frame = tk.Frame(content_frame, bg=self.COLORS["card"])
+            courses_frame.pack(fill=tk.BOTH, expand=True)
+
+            columns = ("م", "رقم الدورة", "اسم الدورة", "الفئة", "عدد المشاركين")
+            details_tree = ttk.Treeview(courses_frame, columns=columns, show="headings", height=12)
+
+            details_tree.column("م", width=50, anchor="center")
+            details_tree.column("رقم الدورة", width=120, anchor="center")
+            details_tree.column("اسم الدورة", width=350, anchor="center")
+            details_tree.column("الفئة", width=150, anchor="center")
+            details_tree.column("عدد المشاركين", width=130, anchor="center")
+
+            for col in columns:
+                details_tree.heading(col, text=col)
+
+            style = ttk.Style()
+            style.configure("Treeview.Heading", font=("Tajawal", 12, "bold"))
+            style.configure("Treeview", font=("Tajawal", 11), rowheight=30)
+
+            for idx, course in enumerate(program_details['courses'], 1):
+                details_tree.insert("", tk.END, values=(
+                    idx,
+                    course['code'],
+                    course['name'],
+                    course['category'],
+                    course['participants']
+                ))
+
+            details_scrollbar = ttk.Scrollbar(courses_frame, orient="vertical", command=details_tree.yview)
+            details_tree.configure(yscrollcommand=details_scrollbar.set)
+
+            details_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            details_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+            # زر الإغلاق
+            close_frame = tk.Frame(content_frame, bg=self.COLORS["card"])
+            close_frame.pack(pady=20)
+
+            tk.Button(
+                close_frame,
+                text="إغلاق",
+                font=("Tajawal", 14, "bold"),
+                bg="#34495e",
+                fg="white",
+                padx=40,
+                pady=12,
+                bd=0,
+                relief=tk.FLAT,
+                cursor="hand2",
+                command=details_window.destroy
+            ).pack()
+
+        programs_listbox.bind('<Double-Button-1>', show_program_details)
+
+        # تحميل البيانات عند البدء
+        load_courses()
+        load_programs()
+
+
+# نقطة البداية
+if __name__ == "__main__":
+    root = tk.Tk()
+    LoginSystem(root)
+    root.mainloop()
